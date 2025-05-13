@@ -1,13 +1,13 @@
 import pandas as pd
 import numpy as np
-from itertools import combinations
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.feature_selection import RFE
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 import joblib
 import os
-from sklearn.feature_selection import RFE
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, 'datasets', 'processed')
@@ -69,13 +69,14 @@ def rfe_feature_selection(data, target_column, n_features=10):
 
     # Get the selected features
     selected_features = X.columns[selector.support_].tolist()
-    print(f"[INFO] Selected features: {selected_features}")
+    print(f"Selected features: {selected_features}")
     return selected_features
 
 def preprocess_data(data, target_column):
     """
     Preprocess the dataset by splitting features and target variable,
-    and then splitting into training and testing datasets.
+    and then splitting into training and testing datasets. This step also
+    standardizes (scales) the features for better performance in regression.
 
     Args:
         data (DataFrame): the input dataset.
@@ -83,42 +84,81 @@ def preprocess_data(data, target_column):
     Returns:
         Split datasets: X_train, X_test, y_train, y_test
     """
-    print("Checking for missing values...")
-    missing_values = data.isnull().sum()
-    print(missing_values[missing_values > 0])
-    print(f"Total missing values: {missing_values.sum()}")
-
+    # Select only numeric columns
     numeric_columns = data.select_dtypes(include=[np.number]).columns
     data[numeric_columns] = data[numeric_columns].fillna(data[numeric_columns].median())
-
-    print("Missing values after filling:")
-    print(data.isnull().sum().sum())
 
     X = data.drop(columns=[target_column])
     y = data[target_column]
 
-    if X.shape[0] == 0:
-        raise ValueError("Error: No valid rows left after preprocessing. Check for missing values.")
-
+    # Standardize
+    scaler = StandardScaler()
+    X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    print(f"[Data preprocessed. Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
+
+    print(f"Data preprocessed. Training samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}")
+
     return X_train, X_test, y_train, y_test
 
-def train_model(X_train, y_train):
+def train_model(X_train, y_train, model_type='linear', cross_validate=True):
     """
-    Train the Linear Regression model using the training data.
+    Train the specified regression model using the training data.
+
+    Args:
+        X_train (DataFrame): training features
+        y_train (Series): training target variable
+        model_type (str): The type of model to use ('linear', 'ridge', 'lasso')
+        cross_validate (bool): Whether to perform cross-validation
+
+    Returns:
+        Trained regression model
+    """
+    if model_type == 'linear':
+        model = LinearRegression()
+    elif model_type == 'ridge':
+        model = Ridge(alpha=1.0)
+    elif model_type == 'lasso':
+        model = Lasso(alpha=0.1)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+    if cross_validate:
+        print(f"Performing Cross-Validation for {model_type} model...")
+        cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='neg_mean_squared_error')
+        print(f"Cross-Validated MSE for {model_type}: {-cv_scores.mean():.4f}")
+    
+    model.fit(X_train, y_train)
+    print(f"Model trained successfully with type: {model_type}")
+    return model
+
+def hyperparameter_tuning(X_train, y_train):
+    """
+    Perform hyperparameter tuning for Ridge and Lasso models using GridSearchCV.
 
     Args:
         X_train (DataFrame): training features
         y_train (Series): training target variable
 
     Returns:
-        Trained Linear Regression model
+        best_ridge (Ridge): Best Ridge model
+        best_lasso (Lasso): Best Lasso model
     """
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    print("Model trained successfully.")
-    return model
+    print("Starting Hyperparameter Tuning...")
+    
+    # Parameter grid for Ridge and Lasso
+    param_grid = {'alpha': [0.01, 0.1, 1.0, 10.0, 100.0]}
+
+    # Ridge Tuning
+    ridge_search = GridSearchCV(Ridge(), param_grid, cv=5, scoring='neg_mean_squared_error')
+    ridge_search.fit(X_train, y_train)
+    print(f"Best Ridge Alpha: {ridge_search.best_params_['alpha']} with MSE: {-ridge_search.best_score_:.4f}")
+
+    # Lasso Tuning
+    lasso_search = GridSearchCV(Lasso(), param_grid, cv=5, scoring='neg_mean_squared_error')
+    lasso_search.fit(X_train, y_train)
+    print(f"Best Lasso Alpha: {lasso_search.best_params_['alpha']} with MSE: {-lasso_search.best_score_:.4f}")
+
+    return ridge_search.best_estimator_, lasso_search.best_estimator_
 
 def evaluate_model(model, X_test, y_test):
     """
@@ -156,8 +196,6 @@ def save_model(model):
     joblib.dump(model, os.path.join(MODEL_PATH, MODEL_NAME))
     print(f"Model saved to {os.path.join(MODEL_PATH, MODEL_NAME)}")
 
-
-
 if __name__ == "__main__":
     # Load the data
     data = load_data('house_prices.csv')
@@ -169,11 +207,16 @@ if __name__ == "__main__":
     data = data[best_features + ['SalePrice']]
     X_train, X_test, y_train, y_test = preprocess_data(data, target_column='SalePrice')
 
-    # Train the model
-    model = train_model(X_train, y_train)
+    # Perform Hyperparameter Tuning
+    ridge_model, lasso_model = hyperparameter_tuning(X_train, y_train)
 
-    # Evaluate the model
-    evaluate_model(model, X_test, y_test)
+    # Train the model with cross-validation for Linear Regression
+    linear_model = train_model(X_train, y_train, model_type='linear')
+    
+    # Evaluate each model
+    evaluate_model(linear_model, X_test, y_test)
+    evaluate_model(ridge_model, X_test, y_test)
+    evaluate_model(lasso_model, X_test, y_test)
 
-    # Save the model
-    save_model(model)
+    # Save the linear regression model
+    save_model(linear_model)
