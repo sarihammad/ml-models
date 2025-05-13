@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import joblib
 
 DATA_PATH = '../datasets/processed/'
-MODEL_PATH = '../models/linear/regresson/'
+MODEL_PATH = '../models/linear_regression/'
 MODEL_NAME = 'linear_regresion_model.pkl'
 PLOT_PATH = '../models/linear_regression/'
 
